@@ -244,7 +244,15 @@ misanthropic = { path = ".", features = ["log", "chat"] }
 
 [features]
 # rustls because I am sick of getting Dependabot alerts for OpenSSL.
-default = ["rustls-tls", "langsan", "client", "batch", "derive", "schema-order"]
+default = [
+    "rustls-tls",
+    "langsan",
+    "client",
+    "batch",
+    "derive",
+    "schema-order",
+    "schema-inline",
+]
 # Image crate support. Note that images are supported without this feature but
 # you must handle encoding/decoding yourself, so it almost always makes sense
 # to enable this and use the image crate.
@@ -353,6 +361,20 @@ derive = ["dep:misanthropic-derive"]
 # so toggling this is always safe. It may simply not have the effect you
 # intend.
 schema-order = ["schemars/preserve_order"]
+# Inline `$ref`/`$defs` subschemas into their use sites when deriving a schema
+# from a Rust type (`ToolArgs::schema`, `OutputConfig::for_type`, and
+# `prompt::output::schema_for`). Default on, and you almost certainly want it
+# on: Anthropic's strict-tool grammar compiler mis-decodes a `$ref`, silently
+# emitting a value the model did not choose, roughly 20-40% of the time.
+#
+#     https://github.com/claudeopusagora/anthropic-strict-ref-repro
+#
+# Turn it off to send `$ref`/`$defs` as `schemars` generates them — worth doing
+# once Anthropic fixes the decoder, or if a large `$def` referenced many times
+# costs more in duplicated prompt tokens than the guarantee is worth. Note the
+# usual Cargo additive-features caveat: opting out means `default-features =
+# false` plus re-listing every other default.
+schema-inline = []
 # Doc-tests the agent skill files (`.claude/skills/*/SKILL.md` and the per-tool
 # resource files they point at) so their code blocks can't drift from the public
 # API. Implies the features the skills document: `client` (Client / streaming),

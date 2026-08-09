@@ -74,21 +74,44 @@ pub trait ToolArgs:
     /// [strict tool use]: <https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/strict-tool-use>
     const STRICT: bool = false;
 
-    /// JSON Schema for `Self`, sanitized for Anthropic. See
-    /// [`sanitize_for_anthropic`](crate::prompt::output::sanitize_for_anthropic).
+    /// JSON Schema for `Self`, with subschemas inlined and sanitized for
+    /// Anthropic. See [`schema_for`](crate::prompt::output::schema_for) —
+    /// which explains why inlining matters under [`STRICT`](Self::STRICT) —
+    /// and [`sanitize_for_anthropic`](crate::prompt::output::sanitize_for_anthropic)
+    /// for the keyword rules.
     fn schema() -> serde_json::Value {
-        let mut schema = serde_json::to_value(schemars::schema_for!(Self))
-            .expect("schemars Schema always serializes");
-        crate::prompt::output::sanitize_for_anthropic(&mut schema);
-        schema
+        crate::prompt::output::schema_for::<Self>()
     }
 
     /// The wire [`CustomMethodDef`] assembled from [`NAME`](Self::NAME),
     /// [`DESCRIPTION`](Self::DESCRIPTION), and [`schema`](Self::schema).
+    ///
+    /// With the `log` feature, warns when [`STRICT`](Self::STRICT) is set and
+    /// a `$ref` survives into the schema — a recursive type, or the
+    /// `schema-inline` feature turned off. Anthropic's strict grammar
+    /// compiler mis-decodes those silently; see
+    /// [`schema_for`](crate::prompt::output::schema_for).
     fn definition() -> CustomMethodDef {
+        let schema = Self::schema();
+
+        #[cfg(feature = "log")]
+        if Self::STRICT && crate::prompt::output::contains_ref(&schema) {
+            log::warn!(
+                "tool {name:?} sets strict but its schema still contains a \
+                 $ref. Anthropic's strict grammar compiler mis-decodes $ref \
+                 subschemas, silently emitting values the model did not \
+                 choose (~20-40% on a small enum). Either the type is \
+                 recursive (which cannot be inlined, and which Anthropic \
+                 rejects outright when the cycle runs through $defs) or the \
+                 `schema-inline` feature is off. See \
+                 https://github.com/claudeopusagora/anthropic-strict-ref-repro",
+                name = Self::NAME,
+            );
+        }
+
         let mut def = CustomMethodDef::builder(Self::NAME)
             .description(Self::DESCRIPTION)
-            .schema(Self::schema())
+            .schema(schema)
             .build()
             .expect("a ToolArgs-derived schema is valid");
         def.defer_loading = Self::DEFER_LOADING.then_some(true);

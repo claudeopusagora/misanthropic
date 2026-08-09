@@ -258,20 +258,19 @@ impl OutputConfig {
         }
     }
 
-    /// Construct from any type implementing [`JsonSchema`]. The generated
-    /// schema is post-processed to match Anthropic's [supported subset]:
-    /// objects get `additionalProperties: false`, and keywords that
-    /// Anthropic rejects (numeric ranges, string lengths, etc.) are
-    /// stripped. See [`sanitize_for_anthropic`] for the full list.
+    /// Construct from any type implementing [`JsonSchema`], via
+    /// [`schema_for`] — subschemas inlined (with the default-on
+    /// `schema-inline` feature) and post-processed to match Anthropic's
+    /// [supported subset]: objects get `additionalProperties: false`, and
+    /// keywords that Anthropic rejects (numeric ranges, string lengths, etc.)
+    /// are stripped. See [`sanitize_for_anthropic`] for the full list.
     ///
     /// [`JsonSchema`]: schemars::JsonSchema
     /// [supported subset]: <https://docs.anthropic.com/en/docs/build-with-claude/structured-outputs#json-schema-limitations>
     /// [`sanitize_for_anthropic`]: self::sanitize_for_anthropic
+    /// [`schema_for`]: self::schema_for
     pub fn for_type<T: schemars::JsonSchema>() -> Self {
-        let mut schema = serde_json::to_value(schemars::schema_for!(T))
-            .expect("schemars Schema always serializes");
-        sanitize_for_anthropic(&mut schema);
-        Self::json_schema(schema)
+        Self::json_schema(schema_for::<T>())
     }
 }
 
@@ -309,6 +308,70 @@ impl From<OutputFormat> for OutputConfig {
             format: Some(format),
             effort: None,
         }
+    }
+}
+
+/// JSON Schema for `T`, ready for the wire: subschemas inlined at their use
+/// sites (with the default-on `schema-inline` feature) and sanitized to
+/// Anthropic's accepted subset by [`sanitize_for_anthropic`].
+///
+/// This is what [`OutputConfig::for_type`] and [`ToolArgs::schema`] both call;
+/// reach for it directly when you need the schema itself.
+///
+/// # Why inline?
+///
+/// `schemars` hoists a named type — a nested struct, a fieldless enum — into
+/// `$defs` and emits a `$ref` at the use site. Anthropic [documents `$ref` and
+/// `$defs` as supported][limits], but under [strict tool use] its grammar
+/// compiler mis-decodes them: the emitted value is one the model did not
+/// choose, with no error and nothing downstream able to tell. Measured at 20%
+/// on `claude-opus-4-6` and 43% on `claude-haiku-4-5` against a six-variant
+/// enum; the same schema with the enum inlined is clean, as are non-strict
+/// tools and [`OutputConfig`]. [Reproducer and data][repro], [discussion][issue].
+///
+/// Inlining is semantics-preserving for non-recursive schemas, so the only
+/// cost of doing it unnecessarily is duplicated bytes when one `$def` is
+/// referenced many times. A recursive type cannot be inlined; `schemars`
+/// leaves those as a `$ref` rather than recursing forever, and Anthropic
+/// rejects a `$defs` cycle with a clear `400`.
+///
+/// Turn the feature off to send `$ref`/`$defs` as generated — see the
+/// `schema-inline` docs in `Cargo.toml` for the trade-off and the
+/// additive-features caveat.
+///
+/// [limits]: <https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations>
+/// [strict tool use]: <https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use>
+/// [repro]: <https://github.com/claudeopusagora/anthropic-strict-ref-repro>
+/// [issue]: <https://github.com/mdegans/misanthropic/issues/147>
+/// [`ToolArgs::schema`]: crate::tool::ToolArgs::schema
+pub fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
+    let settings = schemars::generate::SchemaSettings::default();
+    #[cfg(feature = "schema-inline")]
+    let settings = settings.with(|s| s.inline_subschemas = true);
+
+    let mut schema =
+        serde_json::to_value(settings.into_generator().root_schema_for::<T>())
+            .expect("schemars Schema always serializes");
+    sanitize_for_anthropic(&mut schema);
+    schema
+}
+
+/// Whether `schema` contains a `$ref` anywhere, at any depth.
+///
+/// A `$ref` that survives [`schema_for`] is either a recursive type (which
+/// cannot be inlined) or the `schema-inline` feature turned off. Under
+/// [`strict`](crate::tool::CustomMethodDef::strict) either one risks the
+/// silent mis-decode described on [`schema_for`], which is why
+/// [`ToolArgs::definition`] warns about the combination.
+///
+/// [`ToolArgs::definition`]: crate::tool::ToolArgs::definition
+pub fn contains_ref(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Object(map) => {
+            map.contains_key("$ref") || map.values().any(contains_ref)
+        }
+        serde_json::Value::Array(items) => items.iter().any(contains_ref),
+        _ => false,
     }
 }
 
@@ -869,6 +932,156 @@ mod tests {
         let wire = serde_json::to_string(&schema).unwrap();
         assert_key_order(&wire, &["description", "anyOf", "title"]);
         assert!(!wire.contains("oneOf"), "oneOf survived: {wire}");
+    }
+
+    // --- `schema_for` reference inlining -------------------------------
+    //
+    // The regression guard for <https://github.com/mdegans/misanthropic/issues/147>:
+    // a `$ref` that reaches Anthropic under `strict` is silently mis-decoded,
+    // so the crate's derived schemas must not contain one. Each shape below is
+    // a way `schemars` reaches for `$defs`.
+
+    /// A fieldless enum — the shape that cost an agora council vote. `schemars`
+    /// hoists it to `$defs` and leaves a bare `$ref` at the use site.
+    #[derive(schemars::JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum Stance {
+        Approve,
+        Reject,
+        Abstain,
+    }
+
+    /// A named struct, reached four ways: directly, through `Vec`, through
+    /// `Option`, and a second time to share one `$def` between two fields.
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct Concern {
+        summary: String,
+        blocking: bool,
+    }
+
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct Vote {
+        rationale: String,
+        concerns: Vec<Concern>,
+        chief_concern: Option<Concern>,
+        stance: Stance,
+    }
+
+    /// Fieldless enum, nested struct, `Vec<T>`, `Option<T>`, and a `$def`
+    /// shared by two fields — none of them may leave a `$ref` behind.
+    #[test]
+    #[cfg(feature = "schema-inline")]
+    fn schema_for_inlines_every_ref_shape() {
+        let schema = schema_for::<Vote>();
+        let wire = serde_json::to_string(&schema).unwrap();
+
+        assert!(!contains_ref(&schema), "$ref survived: {wire}");
+        // Structurally, not by substring — these types' own doc comments
+        // mention `$defs`, and those land in `description`.
+        assert!(
+            !schema.as_object().is_some_and(|m| m.contains_key("$defs")),
+            "$defs survived: {wire}"
+        );
+
+        // Inlined in place, not merely deleted: the enum's values and the
+        // shared struct's fields are present at their use sites. `Concern` is
+        // referenced twice, so its duplication is the point.
+        assert!(wire.contains("abstain"), "enum not inlined: {wire}");
+        assert_eq!(
+            wire.matches("\"summary\":").count(),
+            2,
+            "shared $def should be inlined at both use sites: {wire}"
+        );
+    }
+
+    /// The feature's whole reason to exist is the `strict` grammar bug, so the
+    /// opt-out has to actually opt out — this is the arm CI's no-default-features
+    /// run covers.
+    #[test]
+    #[cfg(not(feature = "schema-inline"))]
+    fn schema_for_keeps_refs_when_inlining_is_disabled() {
+        let schema = schema_for::<Vote>();
+        assert!(
+            contains_ref(&schema),
+            "schema-inline is off; $defs/$ref should be untouched: {}",
+            serde_json::to_string(&schema).unwrap()
+        );
+    }
+
+    /// Inlining splices into the `$ref`'s slot rather than appending, so
+    /// declaration order — the thing that makes a reasoning-first args struct
+    /// reason before it commits — survives it. `stance` is declared last and
+    /// must stay last even though it is the field that got expanded.
+    #[test]
+    #[cfg(all(feature = "schema-inline", feature = "schema-order"))]
+    fn schema_for_preserves_declaration_order_through_inlining() {
+        let wire = serde_json::to_string(&schema_for::<Vote>()).unwrap();
+        assert_key_order(
+            &wire,
+            &["rationale", "concerns", "chief_concern", "stance"],
+        );
+    }
+
+    /// A schema with nothing to inline must come out byte-identical to one
+    /// that never went near the inliner.
+    #[test]
+    #[cfg(feature = "schema-inline")]
+    fn schema_for_is_byte_identical_when_there_is_nothing_to_inline() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Flat {
+            zulu: String,
+            yankee: u32,
+            xray: bool,
+        }
+
+        let inlined = serde_json::to_string(&schema_for::<Flat>()).unwrap();
+
+        let mut plain = serde_json::to_value(schemars::schema_for!(Flat))
+            .expect("schemars Schema always serializes");
+        sanitize_for_anthropic(&mut plain);
+
+        assert_eq!(inlined, serde_json::to_string(&plain).unwrap());
+    }
+
+    /// A recursive type cannot be inlined. `schemars` must fall back to a
+    /// `$ref` rather than recursing forever — reaching the assertion at all is
+    /// most of what this test checks. Anthropic rejects the `$defs` form of
+    /// this outright (`400 Circular reference detected`), and
+    /// `ToolArgs::definition` warns when it is paired with `strict`.
+    #[test]
+    fn schema_for_terminates_on_a_recursive_type() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Node {
+            name: String,
+            children: Vec<Node>,
+        }
+
+        assert!(
+            contains_ref(&schema_for::<Node>()),
+            "a cycle cannot be inlined; expected a $ref fallback"
+        );
+    }
+
+    #[test]
+    fn contains_ref_finds_refs_at_any_depth() {
+        assert!(!contains_ref(&json!({"type": "string"})));
+        assert!(contains_ref(&json!({"$ref": "#/$defs/A"})));
+        assert!(contains_ref(
+            &json!({"properties": {"a": {"$ref": "#/$defs/A"}}})
+        ));
+        // Through an array — `anyOf`, `items` of a tuple, and so on.
+        assert!(contains_ref(
+            &json!({"anyOf": [{"type": "null"}, {"$ref": "#/$defs/A"}]})
+        ));
+        // A property *named* `$ref` is indistinguishable from the keyword at
+        // this level and deliberately counts: the warning it drives is
+        // advisory, and a false positive is cheaper than a silent mis-decode.
+        assert!(contains_ref(&json!({"properties": {"$ref": {}}})));
     }
 
     /// Probe struct for the live generation-order tests. Fields are in

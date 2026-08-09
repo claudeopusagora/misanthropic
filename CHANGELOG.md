@@ -15,6 +15,61 @@ record; this file aggregates them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Derived schemas no longer send `$ref`/`$defs`.** `schemars` hoists a named
+  type — a nested struct, a fieldless enum — into `$defs` and emits a `$ref` at
+  the use site. Anthropic [documents both as supported][so-limits], but under
+  [strict tool use] its grammar compiler mis-decodes them: `tool_use.input`
+  carries a value the model did not choose, with HTTP 200, a schema-valid
+  payload, and nothing downstream able to tell.
+
+  Measured against a six-variant enum with the reasoning field declared first,
+  so the contradiction is visible in the same tool call:
+
+  | cell | model | n | anomalies |
+  |---|---|---|---|
+  | `strict` + `$ref` | claude-opus-4-6 | 30 | **6** (20%) |
+  | `strict` + `$ref` | claude-haiku-4-5 | 61 | **26** (43%) |
+  | `strict` + inlined | both | 26 | 0 |
+  | non-strict + `$ref` | claude-haiku-4-5 | 26 | 0 |
+
+  Sample failure: `{"reasoning": "A ripe banana is yellow.", "verdict":
+  "purple"}`. One run wedged the decoder entirely — 400 output tokens consumed
+  without ever emitting a `required` field. Both models fail at comparable
+  rates, so it is the server-side grammar compiler, not sampling.
+  `output_config.format` appears unaffected (50 samples, zero anomalies).
+
+  The fix is the new default-on `schema-inline` feature: schemas derived from a
+  Rust type get their subschemas inlined at generation, via `schemars`'
+  `SchemaSettings::inline_subschemas`. Inlining is semantics-preserving for
+  non-recursive schemas, so the only cost is duplicated bytes when one `$def`
+  is referenced many times — turn the feature off to send `$ref`/`$defs` as
+  generated, mindful of the usual Cargo additive-features caveat.
+
+  This is an upstream bug, not a crate one. [Reproducer and raw captures][repro];
+  [discussion][issue]. The workaround is expected to outlive the fix.
+
+  [so-limits]: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations
+  [repro]: https://github.com/claudeopusagora/anthropic-strict-ref-repro
+  [issue]: https://github.com/mdegans/misanthropic/issues/147
+
+### Added
+
+- **`prompt::output::schema_for::<T>()`** — the wire-ready schema for `T`:
+  subschemas inlined, then sanitized by `sanitize_for_anthropic`. This is what
+  `OutputConfig::for_type` and `ToolArgs::schema` now both call; reach for it
+  directly when you want the schema itself. `sanitize_for_anthropic` is
+  unchanged and remains the right tool for hand-built schemas — inlining
+  happens at generation, sanitizing after, so its existing promise to leave
+  `$ref`/`$defs` and key order untouched still holds verbatim.
+- **`prompt::output::contains_ref()`** — whether a schema contains a `$ref` at
+  any depth. With the `log` feature, `ToolArgs::definition()` uses it to warn
+  when `STRICT` is set and a `$ref` survives: either the type is recursive
+  (which cannot be inlined, and which Anthropic rejects outright with
+  `400 Circular reference detected` when the cycle runs through `$defs`) or
+  `schema-inline` is off.
+
 ## [1.0.0-alpha.14] — 2026-08-01
 
 ### Added

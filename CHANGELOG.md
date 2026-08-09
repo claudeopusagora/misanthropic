@@ -15,6 +15,8 @@ record; this file aggregates them.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.15] — 2026-08-09
+
 ### Fixed
 
 - **Derived schemas no longer send `$ref`/`$defs`.** `schemars` hoists a named

@@ -15,6 +15,18 @@ record; this file aggregates them.
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`Id::Opus41` and `Id::Opus41_20250805` are `#[deprecated]`.** Opus 4.1 was
+  retired from Anthropic's first-party API (2026-08); CI's live
+  `test_ids_are_valid` caught the 404. The variants stay in the enum rather
+  than being deleted — third-party hosts (Bedrock, Vertex) may still serve
+  the model under the same wire id, reachable via a custom
+  [`Client::base_url`] — but referencing either now warns, and they'll be
+  removed in 2.0.
+
+[`Client::base_url`]: https://docs.rs/misanthropic/latest/misanthropic/struct.Client.html#method.base_url
+
 ## [1.0.0-alpha.15] — 2026-08-09
 
 ### Fixed

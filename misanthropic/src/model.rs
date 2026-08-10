@@ -1,4 +1,13 @@
 //! [`Model`] to use for inference.
+//
+// Retired `Id` variants (e.g. `Opus41`) are `#[deprecated]` rather than
+// deleted, so downstream code referencing them still compiles with a
+// warning instead of breaking outright. That means this module's own
+// exhaustive matches and `strum::EnumIter` (test-only) reference them too;
+// allow it here rather than peppering `#[allow(deprecated)]` at every
+// call site. Downstream crates still see the deprecation warning — this
+// only silences it within this crate's own definition of `Id`.
+#![allow(deprecated)]
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -532,10 +541,25 @@ pub enum Id {
     Haiku30,
 
     // ── Claude 4.x ───────────────────────────────────────────────────────
-    /// Opus 4.1 2025-08-05
+    /// Opus 4.1 2025-08-05. Retired from Anthropic's first-party API
+    /// (2026-08) — later Opus releases (and Fable) supersede it at lower
+    /// cost. Third-party hosts (Bedrock, Vertex) may still serve it under
+    /// this wire id; reach one via [`Client::base_url`](crate::Client::base_url).
+    #[deprecated(
+        since = "1.0.0-alpha.16",
+        note = "retired from Anthropic's first-party API; will be removed \
+                in 2.0. Third-party hosts may still serve this id via a \
+                custom Client::base_url."
+    )]
     #[serde(rename = "claude-opus-4-1-20250805")]
     Opus41_20250805,
-    /// Opus 4.1 (latest)
+    /// Opus 4.1 (latest). Retired — see [`Id::Opus41_20250805`].
+    #[deprecated(
+        since = "1.0.0-alpha.16",
+        note = "retired from Anthropic's first-party API; will be removed \
+                in 2.0. Third-party hosts may still serve this id via a \
+                custom Client::base_url."
+    )]
     #[serde(rename = "claude-opus-4-1")]
     Opus41,
     /// Haiku 4.5 2025-10-01
@@ -1019,17 +1043,21 @@ mod tests {
     async fn test_ids_are_valid() {
         // Not probed live: RETIRED ids 404 for everyone *on the API* (the
         // whole Claude 3 family, verified 2026-06-11 — retirement differs
-        // by surface: claude.ai un-retired Opus 3 by popular demand);
-        // GATED ids exist but 404 on accounts without the entitlement
-        // (Mythos is org-approved). A *typo'd* new variant still fails:
-        // it's in neither list. When a model retires, move it here —
-        // consciously.
+        // by surface: claude.ai un-retired Opus 3 by popular demand); Opus
+        // 4.1 retired 2026-08 (also `#[deprecated]` on the `Id` variants —
+        // still reachable on third-party hosts under the same wire id, so
+        // it stays in the enum rather than being deleted). GATED ids exist
+        // but 404 on accounts without the entitlement (Mythos is
+        // org-approved). A *typo'd* new variant still fails: it's in
+        // neither list. When a model retires, move it here — consciously.
         const RETIRED: &[Id] = &[
             Id::Haiku30,
             Id::Haiku35,
             Id::Haiku35_20241022,
             Id::Opus30,
             Id::Opus30_20240229,
+            Id::Opus41,
+            Id::Opus41_20250805,
             Id::Sonnet35,
             Id::Sonnet35_20240620,
             Id::Sonnet35_20241022,

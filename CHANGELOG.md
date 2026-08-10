@@ -15,6 +15,8 @@ record; this file aggregates them.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.16] — 2026-08-10
+
 ### Deprecated
 
 - **`Id::Opus41` and `Id::Opus41_20250805` are `#[deprecated]`.** Opus 4.1 was

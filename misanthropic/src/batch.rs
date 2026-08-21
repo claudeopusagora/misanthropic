@@ -1101,6 +1101,86 @@ mod tests {
         (id, Pending { prompts, meta })
     }
 
+    /// A `P` that is deliberately not `Debug`, `Display` or `Clone`, to
+    /// prove `batch::Error<P>` constrains none of them. A `#[derive(Debug)]`
+    /// on `Error` would add a `P: Debug` bound and fail to compile here.
+    struct NotDebug;
+
+    #[test]
+    fn batch_error_hands_the_pending_back() {
+        use std::error::Error as _;
+
+        let (_, pending) = gen_pending();
+        let batch_id = pending.meta().id.clone();
+
+        let error = Error {
+            client_error: client::Error::NonJsonResponse {
+                status: 503,
+                body: "upstream connect error".to_string(),
+            },
+            pending,
+        };
+
+        // The cause is reachable as a std error source, which is what lets
+        // `anyhow`-based classifiers downcast to `client::Error` through it.
+        assert!(error.source().is_some());
+        // Debug does not require `P: Debug` and does not print prompt bodies.
+        assert!(format!("{error:?}").contains("client_error"));
+
+        // And the batch itself survives — that is the entire point.
+        let (client_error, recovered) = error.decompose();
+        assert!(matches!(
+            client_error,
+            client::Error::NonJsonResponse { status: 503, .. }
+        ));
+        assert_eq!(recovered.meta().id, batch_id);
+        assert_eq!(recovered.prompts().len(), 4);
+    }
+
+    #[test]
+    fn batch_error_is_debug_for_any_p() {
+        let error: Error<NotDebug> = Error {
+            client_error: client::Error::UnexpectedResponse { message: "nope" },
+            pending: Pending {
+                prompts: Prompts {
+                    prompts: HashMap::new(),
+                },
+                meta: Meta {
+                    id: PENDING_ID.into(),
+                    status: Status::Ended,
+                    stats: PENDING_STATS,
+                    created_at: Utc::now(),
+                    expires_at: Utc::now(),
+                    ended_at: None,
+                    cancel_initiated_at: None,
+                    archived_at: None,
+                    results_url: None,
+                },
+            },
+        };
+
+        let _ = format!("{error:?}");
+        // `into_pending` / `From` give the batch back without the cause.
+        let pending: Pending<NotDebug> = error.into();
+        assert_eq!(pending.meta().id, PENDING_ID);
+    }
+
+    /// Guards the rationale for `#[allow(clippy::result_large_err)]` on
+    /// `Client::batch_poll`. The lint wants the `Err` variant boxed, but the
+    /// `Ok` variant carries the same `Pending`, so boxing the error shrinks
+    /// the `Result` by exactly nothing. If this ever stops holding — if
+    /// `Batch` gets smaller than `Error` — the allow should be revisited.
+    #[test]
+    fn boxing_batch_error_would_not_shrink_the_result() {
+        let ok = std::mem::size_of::<Batch<Prompt>>();
+        let err = std::mem::size_of::<Error<Prompt>>();
+        assert!(
+            ok >= err,
+            "Ok variant ({ok} bytes) is no longer at least as large as Err \
+             ({err} bytes); boxing Error would now pay for itself"
+        );
+    }
+
     #[test]
     fn test_pending_meta() {
         let (_, pending) = gen_pending();

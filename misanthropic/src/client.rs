@@ -614,6 +614,13 @@ impl Client {
     /// downloads results, it never re-serializes prompts.
     ///
     /// [`Batch`]: batch::Batch
+    // The `Ok` variant (`Batch<P>`) carries the same `Pending<P>` the `Err`
+    // variant does, so boxing the error would shrink this `Result` by
+    // nothing at all — see `batch::tests::boxing_batch_error_would_not_
+    // shrink_the_result`. Boxing would also cost the caller the direct
+    // `Err(batch::Error { client_error, pending })` destructuring that is
+    // the whole point of the type.
+    #[allow(clippy::result_large_err)]
     #[cfg(feature = "batch")]
     pub async fn batch_poll<P>(
         &self,

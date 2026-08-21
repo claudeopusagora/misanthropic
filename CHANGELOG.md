@@ -15,6 +15,8 @@ record; this file aggregates them.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.17] — 2026-08-21
+
 ### Breaking
 
 - **`Client::batch_poll` returns `batch::Error<P>` instead of `client::Error`,

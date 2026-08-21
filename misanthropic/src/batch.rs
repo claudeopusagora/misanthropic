@@ -33,14 +33,6 @@ pub struct Prompts<P> {
     pub(crate) prompts: HashMap<Id, P>,
 }
 
-impl<P: Clone> Clone for Prompts<P> {
-    fn clone(&self) -> Self {
-        Self {
-            prompts: self.prompts.clone(),
-        }
-    }
-}
-
 impl<P> std::fmt::Debug for Prompts<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.write_str(concat!(stringify!(Prompts), " { ... }"))
@@ -226,7 +218,7 @@ struct Request<'r, P: Serialize> {
 }
 
 /// An Anthropic `message_batch` response with [`Batch`] metadata.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(feature = "partial-eq", test), derive(PartialEq))]
 #[serde(tag = "type")]
 #[serde(rename = "message_batch")]
@@ -255,7 +247,7 @@ pub struct Meta {
 }
 
 /// Anthropic `processing_status` for [`Prompts`]. Member of [`Meta`]data.
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(feature = "partial-eq", test), derive(PartialEq))]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -268,7 +260,7 @@ pub enum Status {
 }
 
 /// Request statistics for a batch of [`Prompts`].
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[cfg_attr(any(feature = "partial-eq", test), derive(PartialEq))]
 pub struct Stats {
     /// Number of processing requests.
@@ -330,15 +322,6 @@ pub struct Pending<P> {
     pub(crate) meta: Meta,
 }
 
-impl<P: Clone> Clone for Pending<P> {
-    fn clone(&self) -> Self {
-        Self {
-            prompts: self.prompts.clone(),
-            meta: self.meta.clone(),
-        }
-    }
-}
-
 // Manual Serialize: only needed when P: Serialize (for submitting).
 impl<P: Serialize> Serialize for Pending<P> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -382,6 +365,96 @@ impl<P> Pending<P> {
     /// Decompose the batch into its parts.
     pub fn decompose(self) -> (Prompts<P>, Meta) {
         (self.prompts, self.meta)
+    }
+}
+
+// Manual, unbounded: mirrors `Prompts`'s impl so a `Pending` is `Debug`
+// regardless of whether `P` is. Prompt bodies are large and often
+// sensitive; printing a placeholder is also the kinder default.
+impl<P> std::fmt::Debug for Pending<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct(stringify!(Pending))
+            .field("prompts", &self.prompts)
+            .field("meta", &self.meta)
+            .finish()
+    }
+}
+
+/// A [`Client::batch_poll`] failure that hands back the [`Pending`] batch it
+/// was polling.
+///
+/// [`Client::batch_poll`] takes its [`Pending`] by value, so without this a
+/// transient edge failure — a gateway 503, a reset connection — would destroy
+/// in-flight batch state that cost real money to submit and that cannot be
+/// reconstructed from the [`Id`] alone.
+///
+/// There is deliberately **no** `From<Error<P>> for client::Error`: `?` must
+/// not silently drop a live batch on the floor. Destructure the error and
+/// decide what to do — retry the poll, or persist the batch somewhere before
+/// giving up. Use [`Error::into_pending`] (or the [`From`] impl) when you have
+/// already classified the cause and only want the batch back.
+///
+/// [`Client::batch_poll`]: crate::Client::batch_poll
+///
+/// ```no_run
+/// # #[cfg(feature = "batch")]
+/// # async fn poll_with_retry<P>(
+/// #     client: &misanthropic::Client,
+/// #     mut pending: misanthropic::batch::Pending<P>,
+/// # ) -> Result<misanthropic::batch::Batch<P>, misanthropic::batch::Error<P>> {
+/// loop {
+///     match client.batch_poll(pending).await {
+///         Ok(batch) => return Ok(batch),
+///         Err(misanthropic::batch::Error { client_error, pending: batch }) => {
+///             if !is_transient(&client_error) {
+///                 // Give the batch back to the caller rather than lose it.
+///                 return Err(misanthropic::batch::Error { client_error, pending: batch });
+///             }
+///             pending = batch;
+///         }
+///     }
+/// }
+/// # }
+/// # #[cfg(feature = "batch")]
+/// # fn is_transient(_: &misanthropic::client::Error) -> bool { true }
+/// ```
+#[derive(thiserror::Error)]
+#[error("{client_error}")]
+pub struct Error<P> {
+    /// Why the poll failed.
+    #[source]
+    pub client_error: client::Error,
+    /// The batch that was being polled, intact and safe to poll again.
+    pub pending: Pending<P>,
+}
+
+impl<P> Error<P> {
+    /// Take the [`Pending`] batch, discarding the cause.
+    pub fn into_pending(self) -> Pending<P> {
+        self.pending
+    }
+
+    /// Split into the cause and the batch.
+    pub fn decompose(self) -> (client::Error, Pending<P>) {
+        (self.client_error, self.pending)
+    }
+}
+
+impl<P> From<Error<P>> for Pending<P> {
+    fn from(error: Error<P>) -> Self {
+        error.pending
+    }
+}
+
+// Manual and unbounded for the same reason as `Pending`'s: `P` is never
+// formatted, so `Error<P>` is `Debug` (and therefore `std::error::Error`)
+// whatever `P` is. A derive would add a `P: Debug` bound.
+impl<P> std::fmt::Debug for Error<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct(stringify!(Error))
+            .field("client_error", &self.client_error)
+            .field("pending", &self.pending)
+            .finish()
     }
 }
 

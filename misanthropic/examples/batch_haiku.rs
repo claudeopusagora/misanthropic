@@ -104,6 +104,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Poll until processing ends. `batch_poll` refreshes the metadata and,
     // once the batch is done, downloads the results and returns `Ready`.
+    //
+    // A poll failure returns `batch::Error`, which carries the `Pending`
+    // batch back out. That matters: the batch is already submitted and
+    // already being paid for, and it cannot be rebuilt from its id, so a
+    // transient gateway 503 must not be allowed to destroy it. Retry a
+    // bounded number of times, then hand the batch back to the caller
+    // rather than dropping it on the floor.
+    let mut retries_left = 5u32;
     let ready = loop {
         let stats = pending.meta().stats;
         println!(
@@ -113,9 +121,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         tokio::time::sleep(Duration::from_secs(args.poll_secs)).await;
 
-        match client.batch_poll(pending).await? {
-            Batch::Pending(next) => pending = next,
-            Batch::Ready(ready) => break ready,
+        match client.batch_poll(pending).await {
+            Ok(Batch::Pending(next)) => pending = next,
+            Ok(Batch::Ready(ready)) => break ready,
+            Err(batch::Error {
+                client_error,
+                pending: batch,
+            }) => {
+                if retries_left == 0 {
+                    eprintln!(
+                        "giving up on batch `{}` after repeated poll \
+                         failures; it is still processing server-side and \
+                         can be polled again by id: {client_error}",
+                        batch.meta().id
+                    );
+                    return Err(client_error.into());
+                }
+                retries_left -= 1;
+                eprintln!(
+                    "poll failed ({client_error}); {retries_left} \
+                     attempt(s) left"
+                );
+                // The batch survived the failure — keep polling it.
+                pending = batch;
+            }
         }
     };
 

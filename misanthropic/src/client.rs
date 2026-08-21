@@ -618,8 +618,26 @@ impl Client {
     pub async fn batch_poll<P>(
         &self,
         mut pending: batch::Pending<P>,
-    ) -> Result<batch::Batch<P>> {
+    ) -> std::result::Result<batch::Batch<P>, batch::Error<P>> {
         use batch::{Batch, Ready};
+
+        // Every fallible step below hands `pending` back in the error rather
+        // than dropping it. A batch costs real money to submit and cannot be
+        // rebuilt from its `Id`, so losing it to a transient gateway 503 is
+        // not an acceptable failure mode. See `batch::Error`.
+        macro_rules! bail {
+            ($result:expr, $pending:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(client_error) => {
+                        return Err(batch::Error {
+                            client_error: client_error.into(),
+                            pending: $pending,
+                        });
+                    }
+                }
+            };
+        }
 
         // Craft the URL for the batch.
         let url = Url::parse(self.batch_url.as_str())
@@ -631,13 +649,17 @@ impl Client {
         // body as text and already surfaces non-JSON error bodies via
         // `Error::NonJsonResponse`, so any failure here is an actual
         // parse error on a body that was at least plausible JSON.
-        let meta_body = self.get(url).await?;
-        pending.meta = serde_json::from_str(&meta_body)?;
+        let meta_body = bail!(self.get(url).await, pending);
+        pending.meta = bail!(serde_json::from_str(&meta_body), pending);
+
+        // Cloned up front so the immutable borrow of `pending` ends here —
+        // the error path below needs to move `pending` into `batch::Error`.
+        let results_url = pending.results_url().cloned();
 
         // Check if we're done.
-        if let Some(url) = pending.results_url() {
+        if let Some(url) = results_url {
             // Download the json lines file with `IdentifiedBatchResult`s.
-            let response = self.get(url.clone()).await?;
+            let response = bail!(self.get(url).await, pending);
 
             // Create a new hashmap to store the results.
             let mut results = HashMap::new();

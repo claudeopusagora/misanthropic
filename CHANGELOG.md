@@ -15,6 +15,46 @@ record; this file aggregates them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`Client::batch_poll` returns `batch::Error<P>` instead of `client::Error`,
+  and `Pending<P>`/`Prompts<P>` no longer implement `Clone`.** `batch_poll`
+  takes its [`Pending`] by value, so any transient failure — a gateway 503, a
+  reset connection — destroyed a batch that was already submitted, already
+  being billed, and not reconstructible from its id. `batch::Error` carries the
+  `Pending` back out in the error:
+
+  ```rust
+  match client.batch_poll(pending).await {
+      Ok(batch) => { /* … */ }
+      Err(batch::Error { client_error, pending }) => {
+          // The batch survived. Retry it, or persist it before giving up.
+      }
+  }
+  ```
+
+  There is deliberately **no** `From<batch::Error<P>> for client::Error`, so
+  `?` cannot silently discard a live batch; use `Error::into_pending`,
+  `Error::decompose`, or the `From<Error<P>> for Pending<P>` impl once the
+  cause has been classified.
+
+  `Clone` (added in #51 for exactly this retry problem) is removed as the
+  inferior fix: it invited cloning an entire batch — up to 256 MB of prompts —
+  before every poll, purely so the copy would survive a failure that is rare.
+  Removing it turns "which call sites need the new error?" into a compile
+  error rather than an audit. Callers that cloned solely to enable retry
+  should destructure `batch::Error` instead; callers that genuinely need a
+  copy can clone the underlying prompts.
+
+### Added
+
+- **`Debug` for `batch::Pending<P>`, `batch::Meta`, `batch::Status` and
+  `batch::Stats`.** `Pending`'s impl is unbounded — it does not require
+  `P: Debug` and prints a placeholder for prompt bodies, matching the existing
+  `Prompts<P>` impl. This is what lets `batch::Error<P>` implement
+  `std::error::Error` for any `P`.
+
+
 ## [1.0.0-alpha.16] — 2026-08-10
 
 ### Deprecated

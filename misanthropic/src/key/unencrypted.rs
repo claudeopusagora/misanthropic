@@ -111,10 +111,11 @@ mod tests {
     }
 
     // Both variants of `Key` must wipe themselves on drop.
-    const _: fn() = || {
+    #[test]
+    fn test_zeroize_on_drop() {
         fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
         assert_zeroize_on_drop::<Key>();
-    };
+    }
 
     #[test]
     fn test_invalid_key_length() {
